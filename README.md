@@ -45,6 +45,10 @@ NeuraPulse AI is a comprehensive, personal healthcare companion application desi
    JWT_SECRET=your_jwt_secret
    GEMINI_API_KEY=your_google_ai_key
    ```
+4. Change directory
+    ```bash
+    cd backend
+    ```
 3. Install dependencies:
    ```bash
    pip install -r requirements.txt
