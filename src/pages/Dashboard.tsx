@@ -197,7 +197,7 @@ const Dashboard = () => {
 
           <TabsContent value="sensors">
             <div className="space-y-6">
-              <GoogleFitConnect userId={user.id} onSyncComplete={() => { }} />
+              <GoogleFitConnect userId={user.id} />
               <WearableDataDashboard userId={user.id} />
             </div>
           </TabsContent>

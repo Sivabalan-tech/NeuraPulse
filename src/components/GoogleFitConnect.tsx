@@ -2,19 +2,17 @@ import { useState, useEffect } from "react";
 import { Button } from "@/components/ui/button";
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from "@/components/ui/card";
 import { useToast } from "@/hooks/use-toast";
-import { Watch, CheckCircle2, XCircle, Loader2, RefreshCw } from "lucide-react";
+import { Watch, CheckCircle2, XCircle, Loader2 } from "lucide-react";
 import { Alert, AlertDescription, AlertTitle } from "@/components/ui/alert";
 import { Badge } from "@/components/ui/badge";
 
 interface GoogleFitConnectProps {
     userId: string;
-    onSyncComplete?: () => void;
 }
 
-const GoogleFitConnect: React.FC<GoogleFitConnectProps> = ({ userId, onSyncComplete }) => {
+const GoogleFitConnect: React.FC<GoogleFitConnectProps> = ({ userId }) => {
     const [isConnected, setIsConnected] = useState(false);
     const [isLoading, setIsLoading] = useState(true);
-    const [isSyncing, setIsSyncing] = useState(false);
     const [connectionInfo, setConnectionInfo] = useState<any>(null);
     const { toast } = useToast();
 
@@ -97,41 +95,6 @@ const GoogleFitConnect: React.FC<GoogleFitConnectProps> = ({ userId, onSyncCompl
         }
     };
 
-    const handleSync = async () => {
-        setIsSyncing(true);
-        try {
-            const token = localStorage.getItem("baymax_token");
-            const response = await fetch(`http://localhost:5000/api/google-fit/sync`, {
-                method: "POST",
-                headers: {
-                    "Authorization": `Bearer ${token}`,
-                    "Content-Type": "application/json"
-                },
-                body: JSON.stringify({ user_id: userId, days: 7 })
-            });
-
-            if (response.ok) {
-                const data = await response.json();
-                toast({
-                    title: "Sync Complete!",
-                    description: `Synced ${data.data_summary.heart_rate_readings} heart rate readings, ${data.data_summary.sleep_sessions} sleep sessions, and more`
-                });
-                checkConnectionStatus();
-                if (onSyncComplete) onSyncComplete();
-            } else {
-                throw new Error("Sync failed");
-            }
-        } catch (error) {
-            toast({
-                title: "Sync Failed",
-                description: "Failed to sync Google Fit data",
-                variant: "destructive"
-            });
-        } finally {
-            setIsSyncing(false);
-        }
-    };
-
     if (isLoading) {
         return (
             <Card>
@@ -198,23 +161,6 @@ const GoogleFitConnect: React.FC<GoogleFitConnectProps> = ({ userId, onSyncCompl
 
                         <div className="flex gap-2">
                             <Button
-                                onClick={handleSync}
-                                disabled={isSyncing}
-                                className="flex-1"
-                            >
-                                {isSyncing ? (
-                                    <>
-                                        <Loader2 className="w-4 h-4 mr-2 animate-spin" />
-                                        Syncing...
-                                    </>
-                                ) : (
-                                    <>
-                                        <RefreshCw className="w-4 h-4 mr-2" />
-                                        Sync Now
-                                    </>
-                                )}
-                            </Button>
-                            <Button
                                 onClick={handleDisconnect}
                                 variant="outline"
                                 className="flex-1"
@@ -226,7 +172,7 @@ const GoogleFitConnect: React.FC<GoogleFitConnectProps> = ({ userId, onSyncCompl
 
                         <Alert>
                             <AlertDescription className="text-xs">
-                                💡 Data syncs automatically. Click "Sync Now" to manually update.
+                                💡 Data syncs automatically whenever you visit the Wearables tab.
                             </AlertDescription>
                         </Alert>
                     </>

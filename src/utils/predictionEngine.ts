@@ -7,6 +7,12 @@ export interface WellnessMetrics {
     overall: number;
 }
 
+export interface WearableData {
+    heart_rate: { value: number, recorded_at: string }[];
+    steps: { value: number, date: string }[];
+    calories: { value: number, date: string }[];
+}
+
 export interface PredictionResult {
     current: WellnessMetrics;
     predicted: WellnessMetrics;
@@ -29,7 +35,10 @@ const moodToNumber = (mood: string | null): number => {
     }
 };
 
-export const calculatePrediction = (logs: HealthLog[]): PredictionResult | null => {
+export const calculatePrediction = (
+    logs: HealthLog[],
+    wearable: WearableData | null = null
+): PredictionResult | null => {
     if (!logs || logs.length < 2) return null;
 
     // Sort by date (ascending)
@@ -40,8 +49,6 @@ export const calculatePrediction = (logs: HealthLog[]): PredictionResult | null 
     // Take last 7 days
     const recentLogs = sortedLogs.slice(-7);
 
-    // Calculate Weights (Recent days have higher impact)
-    // Simple Linear Weight: 1, 2, 3...
     let totalSleep = 0, totalEnergy = 0, totalMood = 0;
     let weightSum = 0;
 
@@ -50,11 +57,20 @@ export const calculatePrediction = (logs: HealthLog[]): PredictionResult | null 
         weightSum += weight;
 
         // Sleep (Normalize to 0-100, assuming 8h is 100)
-        const sleepScore = Math.min(((log.sleep_hours || 0) / 8) * 100, 100);
+        let sleepValue = log.sleep_hours || 0;
+        const sleepScore = Math.min((sleepValue / 8) * 100, 100);
         totalSleep += sleepScore * weight;
 
         // Energy (0-10) -> 0-100
-        const energyScore = (log.energy_level || 0) * 10;
+        let energyScore = (log.energy_level || 0) * 10;
+
+        // Boost energy score if high activity (steps) on that day
+        if (wearable?.steps) {
+            const daySteps = wearable.steps.find(s => s.date === log.log_date);
+            if (daySteps && daySteps.value > 8000) {
+                energyScore = Math.min(energyScore + 10, 100); // 1.0 boost for active days
+            }
+        }
         totalEnergy += energyScore * weight;
 
         // Mood
@@ -66,20 +82,36 @@ export const calculatePrediction = (logs: HealthLog[]): PredictionResult | null 
     const predictedMood = Math.round(totalMood / weightSum);
     const predictedOverall = Math.round((predictedSleep * 0.4) + (predictedEnergy * 0.3) + (predictedMood * 0.3));
 
-    // Current State (Last Log)
+    // Current State (Last Log info)
     const lastLog = recentLogs[recentLogs.length - 1];
     const currentSleep = Math.min(((lastLog.sleep_hours || 0) / 8) * 100, 100);
-    const currentEnergy = (lastLog.energy_level || 0) * 10;
+    let currentEnergy = (lastLog.energy_level || 0) * 10;
+    if (wearable?.steps) {
+        const lastSteps = wearable.steps.find(s => s.date === lastLog.log_date);
+        if (lastSteps && lastSteps.value > 8000) currentEnergy = Math.min(currentEnergy + 10, 100);
+    }
     const currentMood = moodToNumber(lastLog.mood);
     const currentOverall = Math.round((currentSleep * 0.4) + (currentEnergy * 0.3) + (currentMood * 0.3));
 
     let riskLevel: "Low" | "Moderate" | "High" = "Low";
     let insight = "Your wellness trend is positive. Keep it up!";
 
-    if (predictedOverall < 50) {
+    // Logic adjustments based on Heart Rate Trends
+    let hrStressCount = 0;
+    if (wearable?.heart_rate && wearable.heart_rate.length > 5) {
+        // Simple check: if resting HR (using avg of readings if possible, or just latest) is high
+        const avgHR = wearable.heart_rate.slice(-10).reduce((sum, r) => sum + r.value, 0) / 10;
+        if (avgHR > 100) hrStressCount = 20; // Significant stress indicator
+    }
+
+    const finalOverall = Math.max(predictedOverall - hrStressCount, 0);
+
+    if (finalOverall < 50) {
         riskLevel = "High";
-        insight = "Warning: High risk of burnout detected. Prioritize rest tomorrow.";
-    } else if (predictedOverall < 70) {
+        insight = hrStressCount > 0
+            ? "Warning: High heart rate and low energy detected. Seek medical advice if persistent."
+            : "Warning: High risk of burnout detected. Prioritize rest tomorrow.";
+    } else if (finalOverall < 70) {
         riskLevel = "Moderate";
         insight = "Caution: fast-paced trend. Consider light activity.";
     }

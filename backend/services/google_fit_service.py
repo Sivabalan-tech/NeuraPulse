@@ -2,14 +2,30 @@
 Google Fit Service - Handles API interactions with Google Fit
 """
 import os
-from datetime import datetime, timedelta
+from datetime import datetime, timedelta, timezone
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
+
+def _parse_expiry(expiry_val):
+    """Safely parse token_expiry to a datetime object."""
+    if expiry_val is None:
+        return None
+    if isinstance(expiry_val, datetime):
+        return expiry_val
+    if isinstance(expiry_val, str):
+        try:
+            # Handle ISO format strings
+            return datetime.fromisoformat(expiry_val.replace('Z', '+00:00'))
+        except Exception:
+            return None
+    return None
+
+
 class GoogleFitService:
     """Service for interacting with Google Fit API"""
-    
+
     SCOPES = [
         'https://www.googleapis.com/auth/fitness.activity.read',
         'https://www.googleapis.com/auth/fitness.heart_rate.read',
@@ -17,9 +33,11 @@ class GoogleFitService:
         'https://www.googleapis.com/auth/fitness.body.read',
         'https://www.googleapis.com/auth/fitness.location.read'
     ]
-    
+
     def __init__(self, access_token, refresh_token=None, token_expiry=None):
         """Initialize with OAuth tokens"""
+        expiry = _parse_expiry(token_expiry)
+
         self.credentials = Credentials(
             token=access_token,
             refresh_token=refresh_token,
@@ -28,66 +46,81 @@ class GoogleFitService:
             client_secret=os.getenv('GOOGLE_FIT_CLIENT_SECRET'),
             scopes=self.SCOPES
         )
-        
-        if token_expiry:
-            self.credentials.expiry = token_expiry
-    
+
+        if expiry:
+            self.credentials.expiry = expiry
+
+    def refresh_token_if_needed(self):
+        """
+        Check if token needs refresh and refresh if necessary.
+        Returns updated credentials object.
+        """
+        try:
+            if self.credentials.expired and self.credentials.refresh_token:
+                from google.auth.transport.requests import Request
+                self.credentials.refresh(Request())
+                print("✅ Google Fit token refreshed successfully")
+        except Exception as e:
+            print(f"⚠️ Token refresh failed: {e}")
+        return self.credentials
+
     def get_fitness_service(self):
-        """Build and return Google Fit API service"""
+        """Build and return Google Fit API service, refreshing token first."""
+        self.refresh_token_if_needed()
         return build('fitness', 'v1', credentials=self.credentials)
-    
+
     def get_heart_rate_data(self, start_time=None, end_time=None):
         """
         Fetch heart rate data from Google Fit
-        
-        Args:
-            start_time: datetime object (default: 24 hours ago)
-            end_time: datetime object (default: now)
-        
+
         Returns:
-            List of heart rate readings with timestamps
+            List of heart rate readings with timestamps, or raises on error
         """
         if not start_time:
             start_time = datetime.now() - timedelta(days=1)
         if not end_time:
             end_time = datetime.now()
-        
+
         start_nanos = int(start_time.timestamp() * 1e9)
         end_nanos = int(end_time.timestamp() * 1e9)
-        
+
         try:
             service = self.get_fitness_service()
-            
+
             dataset_id = f"{start_nanos}-{end_nanos}"
             data_source = "derived:com.google.heart_rate.bpm:com.google.android.gms:merge_heart_rate_bpm"
-            
+
             response = service.users().dataSources().datasets().get(
                 userId='me',
                 dataSourceId=data_source,
                 datasetId=dataset_id
             ).execute()
-            
+
             heart_rate_data = []
             for point in response.get('point', []):
                 timestamp = datetime.fromtimestamp(int(point['startTimeNanos']) / 1e9)
-                bpm = point['value'][0]['fpVal']
-                
-                heart_rate_data.append({
-                    'timestamp': timestamp,
-                    'bpm': round(bpm, 1),
-                    'source': 'google_fit'
-                })
-            
+                bpm = point['value'][0].get('fpVal', 0)
+                if bpm > 0:
+                    heart_rate_data.append({
+                        'timestamp': timestamp,
+                        'bpm': round(bpm, 1),
+                        'source': 'google_fit'
+                    })
+
+            print(f"✅ Heart rate: fetched {len(heart_rate_data)} readings")
             return heart_rate_data
-        
+
         except HttpError as e:
-            print(f"Error fetching heart rate data: {e}")
-            return []
-    
+            print(f"❌ Error fetching heart rate data: {e.status_code} - {e.reason}")
+            raise
+        except Exception as e:
+            print(f"❌ Unexpected error fetching heart rate: {e}")
+            raise
+
     def get_sleep_data(self, start_time=None, end_time=None):
         """
         Fetch sleep data from Google Fit
-        
+
         Returns:
             List of sleep sessions with duration and quality
         """
@@ -95,26 +128,27 @@ class GoogleFitService:
             start_time = datetime.now() - timedelta(days=7)
         if not end_time:
             end_time = datetime.now()
-        
-        start_millis = int(start_time.timestamp() * 1000)
-        end_millis = int(end_time.timestamp() * 1000)
-        
+
+        # Format without microseconds and always UTC 'Z' suffix
+        def to_rfc3339(dt):
+            return dt.strftime('%Y-%m-%dT%H:%M:%SZ')
+
         try:
             service = self.get_fitness_service()
-            
+
             response = service.users().sessions().list(
                 userId='me',
-                startTime=start_time.isoformat() + 'Z',
-                endTime=end_time.isoformat() + 'Z',
+                startTime=to_rfc3339(start_time),
+                endTime=to_rfc3339(end_time),
                 activityType=72  # Sleep activity type
             ).execute()
-            
+
             sleep_data = []
             for session in response.get('session', []):
                 start = datetime.fromtimestamp(int(session['startTimeMillis']) / 1000)
                 end = datetime.fromtimestamp(int(session['endTimeMillis']) / 1000)
                 duration_hours = (end - start).total_seconds() / 3600
-                
+
                 sleep_data.append({
                     'date': start.date().isoformat(),
                     'start_time': start,
@@ -122,32 +156,32 @@ class GoogleFitService:
                     'duration_hours': round(duration_hours, 2),
                     'source': 'google_fit'
                 })
-            
+
+            print(f"✅ Sleep: fetched {len(sleep_data)} sessions")
             return sleep_data
-        
+
         except HttpError as e:
-            print(f"Error fetching sleep data: {e}")
-            return []
-    
+            print(f"❌ Error fetching sleep data: {e.status_code} - {e.reason}")
+            raise
+        except Exception as e:
+            print(f"❌ Unexpected error fetching sleep: {e}")
+            raise
+
     def get_activity_data(self, start_time=None, end_time=None):
         """
         Fetch activity data (steps, calories, distance)
-        
+
         Returns:
-            Dictionary with steps, calories, and distance
+            List of dicts with steps, calories, distance per day
         """
         if not start_time:
-            start_time = datetime.now() - timedelta(days=1)
+            start_time = datetime.now() - timedelta(days=7)
         if not end_time:
             end_time = datetime.now()
-        
-        start_nanos = int(start_time.timestamp() * 1e9)
-        end_nanos = int(end_time.timestamp() * 1e9)
-        
+
         try:
             service = self.get_fitness_service()
-            
-            # Aggregate data request
+
             body = {
                 "aggregateBy": [
                     {"dataTypeName": "com.google.step_count.delta"},
@@ -158,49 +192,59 @@ class GoogleFitService:
                 "startTimeMillis": int(start_time.timestamp() * 1000),
                 "endTimeMillis": int(end_time.timestamp() * 1000)
             }
-            
+
             response = service.users().dataset().aggregate(
                 userId='me',
                 body=body
             ).execute()
-            
+
             activity_data = []
             for bucket in response.get('bucket', []):
-                date = datetime.fromtimestamp(int(bucket['startTimeMillis']) / 1000).date()
-                
+                bucket_start_ms = int(bucket['startTimeMillis'])
+                # Use actual datetime at midnight of each bucket day
+                bucket_dt = datetime.fromtimestamp(bucket_start_ms / 1000)
+                date_str = bucket_dt.date().isoformat()
+
                 steps = 0
-                calories = 0
-                distance = 0
-                
+                calories = 0.0
+                distance = 0.0
+
                 for dataset in bucket.get('dataset', []):
-                    data_type = dataset.get('dataSourceId', '')
-                    
+                    # Use dataTypeName field for more reliable matching
+                    data_type_name = dataset.get('dataTypeName', '') or dataset.get('dataSourceId', '')
+
                     for point in dataset.get('point', []):
-                        if 'step_count' in data_type:
+                        if 'step_count' in data_type_name:
                             steps += point['value'][0].get('intVal', 0)
-                        elif 'calories' in data_type:
+                        elif 'calories' in data_type_name:
                             calories += point['value'][0].get('fpVal', 0)
-                        elif 'distance' in data_type:
+                        elif 'distance' in data_type_name:
                             distance += point['value'][0].get('fpVal', 0)
-                
+
                 activity_data.append({
-                    'date': date.isoformat(),
+                    'date': date_str,
+                    'datetime': bucket_dt,  # Proper datetime for DB storage
                     'steps': steps,
                     'calories': round(calories, 1),
                     'distance_meters': round(distance, 1),
                     'source': 'google_fit'
                 })
-            
+
+            total_steps = sum(a['steps'] for a in activity_data)
+            print(f"✅ Activity: fetched {len(activity_data)} days, {total_steps} total steps")
             return activity_data
-        
+
         except HttpError as e:
-            print(f"Error fetching activity data: {e}")
-            return []
-    
+            print(f"❌ Error fetching activity data: {e.status_code} - {e.reason}")
+            raise
+        except Exception as e:
+            print(f"❌ Unexpected error fetching activity: {e}")
+            raise
+
     def get_body_data(self, start_time=None, end_time=None):
         """
-        Fetch body measurements (weight, height)
-        
+        Fetch body measurements (weight)
+
         Returns:
             List of body measurements
         """
@@ -208,48 +252,39 @@ class GoogleFitService:
             start_time = datetime.now() - timedelta(days=30)
         if not end_time:
             end_time = datetime.now()
-        
+
         start_nanos = int(start_time.timestamp() * 1e9)
         end_nanos = int(end_time.timestamp() * 1e9)
-        
+
         try:
             service = self.get_fitness_service()
-            
+
             dataset_id = f"{start_nanos}-{end_nanos}"
             weight_source = "derived:com.google.weight:com.google.android.gms:merge_weight"
-            
+
             response = service.users().dataSources().datasets().get(
                 userId='me',
                 dataSourceId=weight_source,
                 datasetId=dataset_id
             ).execute()
-            
+
             body_data = []
             for point in response.get('point', []):
                 timestamp = datetime.fromtimestamp(int(point['startTimeNanos']) / 1e9)
-                weight_kg = point['value'][0]['fpVal']
-                
-                body_data.append({
-                    'timestamp': timestamp,
-                    'weight_kg': round(weight_kg, 2),
-                    'source': 'google_fit'
-                })
-            
+                weight_kg = point['value'][0].get('fpVal', 0)
+                if weight_kg > 0:
+                    body_data.append({
+                        'timestamp': timestamp,
+                        'weight_kg': round(weight_kg, 2),
+                        'source': 'google_fit'
+                    })
+
+            print(f"✅ Body: fetched {len(body_data)} weight readings")
             return body_data
-        
+
         except HttpError as e:
-            print(f"Error fetching body data: {e}")
-            return []
-    
-    def refresh_token_if_needed(self):
-        """
-        Check if token needs refresh and refresh if necessary
-        
-        Returns:
-            Updated credentials object
-        """
-        if self.credentials.expired and self.credentials.refresh_token:
-            from google.auth.transport.requests import Request
-            self.credentials.refresh(Request())
-        
-        return self.credentials
+            print(f"❌ Error fetching body data: {e.status_code} - {e.reason}")
+            raise
+        except Exception as e:
+            print(f"❌ Unexpected error fetching body: {e}")
+            raise

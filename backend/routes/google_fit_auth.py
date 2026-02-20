@@ -117,7 +117,63 @@ def oauth_callback():
         # Clear session
         session.pop('state', None)
         session.pop('user_id', None)
-        
+
+        # Trigger an immediate background sync so dashboard shows data right away
+        import threading
+        def _background_sync(uid):
+            try:
+                from services.google_fit_service import GoogleFitService
+                from database import get_db as _get_db
+                _db = _get_db()
+                _tokens = _db['google_fit_tokens']
+                _sensor = _db['sensor_readings']
+                _health = _db['health_logs']
+                t_data = _tokens.find_one({'user_id': uid})
+                if not t_data:
+                    return
+                svc = GoogleFitService(
+                    access_token=t_data['access_token'],
+                    refresh_token=t_data.get('refresh_token'),
+                    token_expiry=t_data.get('token_expiry')
+                )
+                from datetime import datetime, timedelta
+                end = datetime.now()
+                start = end - timedelta(days=7)
+                # Steps/Calories
+                try:
+                    for act in svc.get_activity_data(start, end):
+                        rec_at = act['datetime']
+                        if act['steps'] > 0:
+                            _sensor.update_one(
+                                {'user_id': uid, 'type': 'steps', 'recorded_at': rec_at},
+                                {'$set': {'value': act['steps'], 'unit': 'steps', 'source': 'google_fit', 'date': act['date'], 'synced_at': datetime.utcnow()}},
+                                upsert=True
+                            )
+                        if act['calories'] > 0:
+                            _sensor.update_one(
+                                {'user_id': uid, 'type': 'calories', 'recorded_at': rec_at},
+                                {'$set': {'value': act['calories'], 'unit': 'kcal', 'source': 'google_fit', 'date': act['date'], 'synced_at': datetime.utcnow()}},
+                                upsert=True
+                            )
+                except Exception as e:
+                    print(f"Auto-sync activity error: {e}")
+                # Heart rate
+                try:
+                    for hr in svc.get_heart_rate_data(start, end):
+                        _sensor.update_one(
+                            {'user_id': uid, 'type': 'heart_rate', 'recorded_at': hr['timestamp']},
+                            {'$set': {'value': hr['bpm'], 'unit': 'bpm', 'source': 'google_fit', 'synced_at': datetime.utcnow()}},
+                            upsert=True
+                        )
+                except Exception as e:
+                    print(f"Auto-sync heart rate error: {e}")
+                _tokens.update_one({'user_id': uid}, {'$set': {'last_sync': datetime.utcnow()}})
+                print(f"✅ Auto-sync complete for user {uid}")
+            except Exception as e:
+                print(f"Auto-sync background error: {e}")
+
+        threading.Thread(target=_background_sync, args=(user_id,), daemon=True).start()
+
         # Redirect to frontend with success
         return redirect(f'http://localhost:8080/dashboard?google_fit=connected')
     
